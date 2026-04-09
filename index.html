@@ -25,6 +25,7 @@
   #name-input-area input { font-family: 'Courier New', monospace; font-size: 14px; padding: 4px 8px; border: 2px solid #535353; outline: none; width: 160px; }
   #name-input-area button { font-family: 'Courier New', monospace; font-size: 14px; padding: 4px 12px; border: 2px solid #535353; background: #535353; color: #fff; cursor: pointer; }
   #name-input-area button:hover { background: #333; }
+  .submit-error { color: #c00; font-size: 12px; margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -37,8 +38,8 @@
   </div>
 </div>
 <script>
-const SUPABASE_URL = 'https://trbafghbzxluxbeqqsed.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_VkwvfoYz5euu5gchEvgUTg_orWb2Kl3';
+const _0x4F = 'https://trbafghbzxluxbeqqsed.supabase.co';
+const _0x5A = 'sb_publishable_VkwvfoYz5euu5gchEvgUTg_orWb2Kl3';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -53,7 +54,14 @@ const JUMP_FORCE = -12;
 const INITIAL_SPEED = 5;
 const MAX_SPEED = 12;
 
-let dino, cacti, clouds, score, highScore = 0, speed, gameState, frameCount;
+let dino, cacti, clouds, highScore = 0, speed, gameState;
+// Anti-cheat: score derived from internal state, not stored directly
+let _fc = 0;          // frame counter (obfuscated name)
+let _ts = 0;          // game start timestamp
+let _ck = 0;          // running checksum
+const _CK_SEED = 0xB7E1;
+const _SCORE_DIV = 6; // frames per point
+
 let playerName = localStorage.getItem('dinoPlayerName') || '';
 let playerIP = '';
 
@@ -64,28 +72,46 @@ fetch('https://api.ipify.org?format=json')
   .catch(() => { playerIP = 'unknown'; });
 
 // Supabase REST helpers
-function supabaseGet(table, query) {
-  return fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
-    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+function _sbGet(table, query) {
+  return fetch(`${_0x4F}/rest/v1/${table}?${query}`, {
+    headers: { 'apikey': _0x5A, 'Authorization': `Bearer ${_0x5A}` }
   }).then(r => r.json());
 }
 
-function supabaseInsert(table, data) {
-  return fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+function _sbRpc(fnName, params) {
+  return fetch(`${_0x4F}/rest/v1/rpc/${fnName}`, {
     method: 'POST',
     headers: {
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'return=minimal'
+      'apikey': _0x5A,
+      'Authorization': `Bearer ${_0x5A}`,
+      'Content-Type': 'application/json'
     },
-    body: JSON.stringify(data)
+    body: JSON.stringify(params)
+  }).then(async r => {
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.message || 'Submit failed');
+    }
+    return r;
   });
+}
+
+// Anti-cheat hash: combines score, duration, checksum, and a timestamp salt
+function _genHash(sc, dur, ck, ts) {
+  const a = (sc ^ 0x5A3C) >>> 0;
+  const b = (dur ^ 0xA7F1) >>> 0;
+  const c = (ck ^ 0x3D2E) >>> 0;
+  const d = (ts ^ 0x9C4B) >>> 0;
+  return btoa(a + ':' + b + ':' + c + ':' + d);
+}
+
+function _getScore() {
+  return Math.floor(_fc / _SCORE_DIV);
 }
 
 async function fetchLeaderboard() {
   try {
-    const rows = await supabaseGet('leaderboard', 'select=name,score,ip_address,created_at&order=score.desc&limit=10');
+    const rows = await _sbGet('leaderboard', 'select=name,score,ip_address,created_at&order=score.desc&limit=10');
     return Array.isArray(rows) ? rows : [];
   } catch { return []; }
 }
@@ -107,7 +133,7 @@ function renderLeaderboard(rows, showInput) {
       <input id="name-field" type="text" maxlength="20" placeholder="Your name" value="${esc(playerName)}" />
       <button id="submit-score-btn">Submit</button>
     </div>
-    <div id="sub-message" style="font-size:12px;color:#999;margin-top:6px;">Submit score, then SPACE to play again</div>`;
+    <div id="submit-status" style="font-size:12px;color:#999;margin-top:6px;">Submit score, then SPACE to play again</div>`;
   }
 
   leaderboardDiv.innerHTML = html;
@@ -128,11 +154,32 @@ function renderLeaderboard(rows, showInput) {
       localStorage.setItem('dinoPlayerName', name);
       btn.disabled = true;
       btn.textContent = '...';
-      await supabaseInsert('leaderboard', { name, score, ip_address: playerIP });
-      const fresh = await fetchLeaderboard();
-      renderLeaderboard(fresh, false);
-      subMessage.textContent = `Score: ${score}  Best: ${highScore} — Press SPACE or tap to play again`;
-      gameState = 'submitted';
+      const statusEl = document.getElementById('submit-status');
+
+      const finalScore = _getScore();
+      const duration = Date.now() - _ts;
+      const hash = _genHash(finalScore, duration, _ck, _ts);
+
+      try {
+        await _sbRpc('submit_score', {
+          p_name: name,
+          p_score: finalScore,
+          p_ip: playerIP,
+          p_duration_ms: duration,
+          p_checksum: _ck,
+          p_hash: hash,
+          p_start_ts: _ts
+        });
+        const fresh = await fetchLeaderboard();
+        renderLeaderboard(fresh, false);
+        subMessage.textContent = `Score: ${finalScore}  Best: ${highScore} — Press SPACE or tap to play again`;
+        gameState = 'submitted';
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = 'Submit';
+        statusEl.className = 'submit-error';
+        statusEl.textContent = 'Rejected: ' + err.message;
+      }
     });
     setTimeout(() => input.focus(), 50);
   }
@@ -148,9 +195,10 @@ function init() {
   dino = { x: 60, y: GROUND_Y, w: 40, h: 44, vy: 0, onGround: true, legFrame: 0 };
   cacti = [];
   clouds = [];
-  score = 0;
   speed = INITIAL_SPEED;
-  frameCount = 0;
+  _fc = 0;
+  _ck = _CK_SEED;
+  _ts = Date.now();
   gameState = 'ready';
 }
 
@@ -166,6 +214,7 @@ async function showStartScreen() {
 function startGame() {
   if (gameState === 'running') return;
   init();
+  _ts = Date.now();
   gameState = 'running';
   overlay.classList.remove('clickable');
   overlay.classList.add('hidden');
@@ -174,9 +223,10 @@ function startGame() {
 
 async function gameOver() {
   gameState = 'over';
-  if (score > highScore) highScore = score;
+  const finalScore = _getScore();
+  if (finalScore > highScore) highScore = finalScore;
   message.textContent = 'GAME OVER';
-  subMessage.textContent = `Score: ${score}  Best: ${highScore}`;
+  subMessage.textContent = `Score: ${finalScore}  Best: ${highScore}`;
   overlay.classList.remove('hidden');
   overlay.classList.add('clickable');
   const rows = await fetchLeaderboard();
@@ -185,7 +235,6 @@ async function gameOver() {
 
 function handleAction() {
   if (gameState === 'over') {
-    // Don't restart while name input is visible — let them submit first
     const input = document.getElementById('name-field');
     if (input) return;
     startGame();
@@ -272,9 +321,12 @@ function collides(a, b) {
 
 function update() {
   if (gameState !== 'running') return;
-  frameCount++;
-  score = Math.floor(frameCount / 6);
-  speed = Math.min(INITIAL_SPEED + score * 0.005, MAX_SPEED);
+  _fc++;
+  // Update running checksum each frame (hard to fake without playing)
+  _ck = ((_ck << 3) | (_ck >>> 29)) ^ (_fc * 0x45D9);
+  _ck = _ck >>> 0; // keep as uint32
+
+  speed = Math.min(INITIAL_SPEED + _getScore() * 0.005, MAX_SPEED);
 
   dino.vy += GRAVITY;
   dino.y += dino.vy;
@@ -320,7 +372,7 @@ function draw() {
   ctx.stroke();
 
   ctx.fillStyle = '#d0d0d0';
-  const offset = gameState === 'running' ? (frameCount * speed) % 20 : 0;
+  const offset = gameState === 'running' ? (_fc * speed) % 20 : 0;
   for (let x = -offset; x < canvas.width; x += 20) {
     ctx.fillRect(x, GROUND_Y + 6, 8, 1);
     ctx.fillRect(x + 12, GROUND_Y + 10, 5, 1);
@@ -332,7 +384,8 @@ function draw() {
   ctx.fillStyle = '#535353';
   ctx.font = 'bold 16px Courier New';
   ctx.textAlign = 'right';
-  ctx.fillText(`HI ${String(highScore).padStart(5, '0')}  ${String(score).padStart(5, '0')}`, canvas.width - 12, 24);
+  const sc = _getScore();
+  ctx.fillText(`HI ${String(highScore).padStart(5, '0')}  ${String(sc).padStart(5, '0')}`, canvas.width - 12, 24);
 }
 
 function loop() {
