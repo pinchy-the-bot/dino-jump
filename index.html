@@ -9,10 +9,22 @@
   body { background: #f7f7f7; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: 'Courier New', monospace; }
   #game-container { position: relative; }
   canvas { border: 2px solid #535353; background: #fff; display: block; }
-  #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; pointer-events: none; }
+  #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; pointer-events: none; background: rgba(255,255,255,0.92); }
   #overlay.clickable { pointer-events: auto; cursor: pointer; }
+  #overlay.hidden { display: none; }
   #message { font-size: 24px; color: #535353; font-weight: bold; }
   #sub-message { font-size: 14px; color: #757575; margin-top: 8px; }
+  #leaderboard { margin-top: 12px; width: 90%; max-width: 500px; }
+  #leaderboard table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #leaderboard th { text-align: left; color: #535353; border-bottom: 2px solid #535353; padding: 4px 8px; }
+  #leaderboard td { padding: 3px 8px; color: #757575; border-bottom: 1px solid #e0e0e0; }
+  #leaderboard td:first-child, #leaderboard th:first-child { text-align: center; width: 30px; }
+  #leaderboard td:nth-child(3), #leaderboard th:nth-child(3) { text-align: right; }
+  #leaderboard td:nth-child(4), #leaderboard th:nth-child(4) { text-align: right; font-size: 11px; }
+  #name-input-area { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+  #name-input-area input { font-family: 'Courier New', monospace; font-size: 14px; padding: 4px 8px; border: 2px solid #535353; outline: none; width: 160px; }
+  #name-input-area button { font-family: 'Courier New', monospace; font-size: 14px; padding: 4px 12px; border: 2px solid #535353; background: #535353; color: #fff; cursor: pointer; }
+  #name-input-area button:hover { background: #333; }
 </style>
 </head>
 <body>
@@ -21,14 +33,19 @@
   <div id="overlay" class="clickable">
     <div id="message">DINO JUMP!</div>
     <div id="sub-message">Press SPACE or tap to start</div>
+    <div id="leaderboard"></div>
   </div>
 </div>
 <script>
+const SUPABASE_URL = 'https://trbafghbzxluxbeqqsed.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_VkwvfoYz5euu5gchEvgUTg_orWb2Kl3';
+
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const overlay = document.getElementById('overlay');
 const message = document.getElementById('message');
 const subMessage = document.getElementById('sub-message');
+const leaderboardDiv = document.getElementById('leaderboard');
 
 const GROUND_Y = 200;
 const GRAVITY = 0.6;
@@ -37,6 +54,95 @@ const INITIAL_SPEED = 5;
 const MAX_SPEED = 12;
 
 let dino, cacti, clouds, score, highScore = 0, speed, gameState, frameCount;
+let playerName = localStorage.getItem('dinoPlayerName') || '';
+let playerIP = '';
+
+// Fetch player IP
+fetch('https://api.ipify.org?format=json')
+  .then(r => r.json())
+  .then(data => { playerIP = data.ip; })
+  .catch(() => { playerIP = 'unknown'; });
+
+// Supabase REST helpers
+function supabaseGet(table, query) {
+  return fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
+    headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }
+  }).then(r => r.json());
+}
+
+function supabaseInsert(table, data) {
+  return fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: 'POST',
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=minimal'
+    },
+    body: JSON.stringify(data)
+  });
+}
+
+async function fetchLeaderboard() {
+  try {
+    const rows = await supabaseGet('leaderboard', 'select=name,score,ip_address,created_at&order=score.desc&limit=10');
+    return Array.isArray(rows) ? rows : [];
+  } catch { return []; }
+}
+
+function renderLeaderboard(rows, showInput) {
+  if (!rows.length && !showInput) {
+    leaderboardDiv.innerHTML = '<div style="color:#aaa;margin-top:8px;">No scores yet. Be the first!</div>';
+    return;
+  }
+  let html = '<table><tr><th>#</th><th>Name</th><th>Score</th><th>IP</th></tr>';
+  rows.forEach((r, i) => {
+    const ip = r.ip_address || '?';
+    html += `<tr><td>${i + 1}</td><td>${esc(r.name)}</td><td>${r.score}</td><td>${esc(ip)}</td></tr>`;
+  });
+  html += '</table>';
+
+  if (showInput) {
+    html += `<div id="name-input-area">
+      <input id="name-field" type="text" maxlength="20" placeholder="Your name" value="${esc(playerName)}" />
+      <button id="submit-score-btn">Submit</button>
+    </div>
+    <div id="sub-message" style="font-size:12px;color:#999;margin-top:6px;">Submit score, then SPACE to play again</div>`;
+  }
+
+  leaderboardDiv.innerHTML = html;
+
+  if (showInput) {
+    const input = document.getElementById('name-field');
+    const btn = document.getElementById('submit-score-btn');
+    input.addEventListener('click', e => e.stopPropagation());
+    input.addEventListener('keydown', e => {
+      e.stopPropagation();
+      if (e.key === 'Enter') btn.click();
+    });
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const name = input.value.trim();
+      if (!name) { input.focus(); return; }
+      playerName = name;
+      localStorage.setItem('dinoPlayerName', name);
+      btn.disabled = true;
+      btn.textContent = '...';
+      await supabaseInsert('leaderboard', { name, score, ip_address: playerIP });
+      const fresh = await fetchLeaderboard();
+      renderLeaderboard(fresh, false);
+      subMessage.textContent = `Score: ${score}  Best: ${highScore} — Press SPACE or tap to play again`;
+      gameState = 'submitted';
+    });
+    setTimeout(() => input.focus(), 50);
+  }
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
 
 function init() {
   dino = { x: 60, y: GROUND_Y, w: 40, h: 44, vy: 0, onGround: true, legFrame: 0 };
@@ -48,25 +154,44 @@ function init() {
   gameState = 'ready';
 }
 
+async function showStartScreen() {
+  message.textContent = 'DINO JUMP!';
+  subMessage.textContent = 'Press SPACE or tap to start';
+  overlay.classList.remove('hidden');
+  overlay.classList.add('clickable');
+  const rows = await fetchLeaderboard();
+  renderLeaderboard(rows, false);
+}
+
 function startGame() {
   if (gameState === 'running') return;
   init();
   gameState = 'running';
   overlay.classList.remove('clickable');
-  overlay.style.display = 'none';
+  overlay.classList.add('hidden');
+  leaderboardDiv.innerHTML = '';
 }
 
-function gameOver() {
+async function gameOver() {
   gameState = 'over';
   if (score > highScore) highScore = score;
   message.textContent = 'GAME OVER';
-  subMessage.textContent = `Score: ${score}  Best: ${highScore} — Press SPACE or tap to restart`;
-  overlay.style.display = 'flex';
+  subMessage.textContent = `Score: ${score}  Best: ${highScore}`;
+  overlay.classList.remove('hidden');
   overlay.classList.add('clickable');
+  const rows = await fetchLeaderboard();
+  renderLeaderboard(rows, true);
 }
 
-function jump() {
-  if (gameState === 'over') { startGame(); return; }
+function handleAction() {
+  if (gameState === 'over') {
+    // Don't restart while name input is visible — let them submit first
+    const input = document.getElementById('name-field');
+    if (input) return;
+    startGame();
+    return;
+  }
+  if (gameState === 'submitted') { startGame(); return; }
   if (gameState === 'ready') { startGame(); }
   if (dino.onGround) {
     dino.vy = JUMP_FORCE;
@@ -75,28 +200,23 @@ function jump() {
 }
 
 // Input
-document.addEventListener('keydown', e => { if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); } });
-canvas.addEventListener('click', jump);
-overlay.addEventListener('click', jump);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); handleAction(); }
+});
+canvas.addEventListener('click', handleAction);
+overlay.addEventListener('click', handleAction);
 
 // Drawing helpers
 function drawDino() {
   ctx.fillStyle = '#535353';
-  // Body
   ctx.fillRect(dino.x + 4, dino.y - 40, 28, 32);
-  // Head
   ctx.fillRect(dino.x + 16, dino.y - 44, 24, 16);
-  // Eye
   ctx.fillStyle = '#fff';
   ctx.fillRect(dino.x + 32, dino.y - 42, 4, 4);
   ctx.fillStyle = '#535353';
-  // Mouth
   ctx.fillRect(dino.x + 28, dino.y - 30, 12, 2);
-  // Arms
   ctx.fillRect(dino.x, dino.y - 24, 8, 4);
-  // Tail
   ctx.fillRect(dino.x - 4, dino.y - 32, 8, 6);
-  // Legs (animated)
   if (dino.onGround && gameState === 'running') {
     dino.legFrame = (dino.legFrame + 0.15) % 2;
     if (dino.legFrame < 1) {
@@ -115,17 +235,14 @@ function drawDino() {
 function drawCactus(c) {
   ctx.fillStyle = '#2a6e2a';
   if (c.type === 0) {
-    // Small single cactus
     ctx.fillRect(c.x + 6, GROUND_Y - 34, 8, 34);
     ctx.fillRect(c.x, GROUND_Y - 24, 6, 12);
     ctx.fillRect(c.x + 14, GROUND_Y - 28, 6, 12);
   } else if (c.type === 1) {
-    // Tall cactus
     ctx.fillRect(c.x + 6, GROUND_Y - 46, 8, 46);
     ctx.fillRect(c.x, GROUND_Y - 36, 6, 14);
     ctx.fillRect(c.x + 14, GROUND_Y - 40, 6, 14);
   } else {
-    // Double cactus
     ctx.fillRect(c.x + 2, GROUND_Y - 30, 8, 30);
     ctx.fillRect(c.x + 16, GROUND_Y - 38, 8, 38);
     ctx.fillRect(c.x + 24, GROUND_Y - 28, 6, 12);
@@ -159,25 +276,21 @@ function update() {
   score = Math.floor(frameCount / 6);
   speed = Math.min(INITIAL_SPEED + score * 0.005, MAX_SPEED);
 
-  // Dino physics
   dino.vy += GRAVITY;
   dino.y += dino.vy;
   if (dino.y >= GROUND_Y) { dino.y = GROUND_Y; dino.vy = 0; dino.onGround = true; }
 
-  // Spawn cacti
   const lastCactus = cacti[cacti.length - 1];
   const minGap = 300 / (speed / INITIAL_SPEED);
   if (!lastCactus || lastCactus.x < canvas.width - minGap - Math.random() * 200) {
     cacti.push({ x: canvas.width + Math.random() * 100, type: Math.floor(Math.random() * 3) });
   }
 
-  // Move cacti
   for (let i = cacti.length - 1; i >= 0; i--) {
     cacti[i].x -= speed;
     if (cacti[i].x < -40) cacti.splice(i, 1);
   }
 
-  // Spawn clouds
   if (Math.random() < 0.005) {
     clouds.push({ x: canvas.width, y: 30 + Math.random() * 60 });
   }
@@ -186,7 +299,6 @@ function update() {
     if (clouds[i].x < -50) clouds.splice(i, 1);
   }
 
-  // Collision
   for (const c of cacti) {
     const hb = getHitbox(c);
     if (collides({ x: dino.x, y: dino.y, w: 36, h: 40 }, hb)) {
@@ -198,11 +310,8 @@ function update() {
 
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // Clouds
   clouds.forEach(drawCloud);
 
-  // Ground line
   ctx.strokeStyle = '#535353';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -210,7 +319,6 @@ function draw() {
   ctx.lineTo(canvas.width, GROUND_Y + 2);
   ctx.stroke();
 
-  // Ground texture
   ctx.fillStyle = '#d0d0d0';
   const offset = gameState === 'running' ? (frameCount * speed) % 20 : 0;
   for (let x = -offset; x < canvas.width; x += 20) {
@@ -218,13 +326,9 @@ function draw() {
     ctx.fillRect(x + 12, GROUND_Y + 10, 5, 1);
   }
 
-  // Cacti
   cacti.forEach(drawCactus);
-
-  // Dino
   drawDino();
 
-  // Score
   ctx.fillStyle = '#535353';
   ctx.font = 'bold 16px Courier New';
   ctx.textAlign = 'right';
@@ -238,6 +342,7 @@ function loop() {
 }
 
 init();
+showStartScreen();
 loop();
 </script>
 </body>
